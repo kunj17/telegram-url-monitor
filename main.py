@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # === CONFIG ===
-TELEGRAM_TOKEN = "7935964890:AAH__dT03uCuPDr4ht8CNJ7_7nL5yb6Ukig"
-CHAT_ID = 1002644823532
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 DATA_FILE = 'urls.json'
 HASH_FILE = 'url_hashes.json'
 
