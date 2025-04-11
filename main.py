@@ -2,6 +2,7 @@ import json
 import hashlib
 import os
 import requests
+import subprocess
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import (
@@ -10,7 +11,6 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
-    JobQueue,
 )
 from dotenv import load_dotenv
 
@@ -18,7 +18,14 @@ load_dotenv()
 
 # === CONFIG ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
+if TELEGRAM_TOKEN is None:
+    raise EnvironmentError("TELEGRAM_TOKEN environment variable not set.")
+
+chat_id_str = os.getenv("CHAT_ID")
+if chat_id_str is None:
+    raise EnvironmentError("CHAT_ID environment variable not set.")
+CHAT_ID = int(chat_id_str)
+
 DATA_FILE = 'urls.json'
 HASH_FILE = 'url_hashes.json'
 
@@ -29,6 +36,7 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=2)
+    commit_and_push_changes("✅ Updated URL data")
 
 def load_hashes():
     return json.load(open(HASH_FILE)) if os.path.exists(HASH_FILE) else {}
@@ -36,9 +44,35 @@ def load_hashes():
 def save_hashes(hashes):
     with open(HASH_FILE, 'w') as f:
         json.dump(hashes, f, indent=2)
+    commit_and_push_changes("✅ Updated hash data")
+
+# =============== COMMIT CHANGES IMMEDIATELY ===============
+def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
+    try:
+        subprocess.run(["git", "config", "--global", "user.name", "bot-runner"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "bot@auto.commit"], check=True)
+
+        repo = os.getenv("GITHUB_REPOSITORY")
+        token = os.getenv("GH_PAT")
+        if not token or not repo:
+            print("❌ GH_PAT or GITHUB_REPOSITORY not set")
+            return
+
+        subprocess.run([
+            "git", "remote", "set-url", "origin",
+            f"https://x-access-token:{token}@github.com/{repo}.git"
+        ], check=True)
+
+        subprocess.run(["git", "add", DATA_FILE, HASH_FILE], check=True)
+        subprocess.run(["git", "commit", "-m", message], check=False)
+        subprocess.run(["git", "push"], check=True)
+
+        print("✅ Committed & pushed with GH_PAT successfully.")
+    except Exception as e:
+        print(f"❌ Commit failed: {e}")
 
 # =============== MONITORING LOGIC ===============
-def get_page_hash(url: str) -> str | None:
+def get_page_hash(url):
     try:
         html = requests.get(url, timeout=10).text
         soup = BeautifulSoup(html, 'html.parser')
@@ -49,9 +83,7 @@ def get_page_hash(url: str) -> str | None:
 async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
     urls = load_data()
     hashes = load_hashes()
-    updated = False
     bot = context.bot
-    chat_id = CHAT_ID
 
     for label, url in urls.items():
         new_hash = get_page_hash(url)
@@ -60,15 +92,12 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
 
         if hashes.get(label) != new_hash:
             await bot.send_message(
-                chat_id=chat_id,
+                chat_id=CHAT_ID,
                 text=f"🔔 *{label}* has been updated!\n{url}",
                 parse_mode="Markdown"
             )
             hashes[label] = new_hash
-            updated = True
-
-    if updated:
-        save_hashes(hashes)
+            save_hashes(hashes)
 
 # =============== TELEGRAM COMMANDS ===============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,8 +108,8 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    args = context.args
-    if not args or len(args) < 2:
+    args = context.args or []
+    if len(args) < 2:
         await update.message.reply_text("Usage: /add [label] [url]")
         return
 
@@ -118,7 +147,7 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    args = context.args
+    args = context.args or []
     if not args:
         await update.message.reply_text("Usage: /remove [label]")
         return
@@ -144,7 +173,7 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("Command not recognized. Use /add, /remove, or /list.")
 
-# =============== MAIN APP ===============
+# =============== MAIN ===============
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -154,12 +183,13 @@ def main():
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    # ✅ Run job queue task ONLY if job queue exists
     if app.job_queue:
         app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
 
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        commit_and_push_changes("🤖 Final auto-persist on workflow shutdown")
 
 if __name__ == '__main__':
     main()
-
