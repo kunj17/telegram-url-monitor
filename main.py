@@ -1,14 +1,24 @@
-# telegram_url_monitor/main.py
-import logging, json, hashlib, os, requests
+import json
+import hashlib
+import os
+import requests
 from bs4 import BeautifulSoup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    JobQueue,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # === CONFIG ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
+TELEGRAM_TOKEN = "7935964890:AAH__dT03uCuPDr4ht8CNJ7_7nL5yb6Ukig"
+CHAT_ID = 1002644823532
 DATA_FILE = 'urls.json'
 HASH_FILE = 'url_hashes.json'
 
@@ -28,20 +38,20 @@ def save_hashes(hashes):
         json.dump(hashes, f, indent=2)
 
 # =============== MONITORING LOGIC ===============
-def get_page_hash(url):
+def get_page_hash(url: str) -> str | None:
     try:
         html = requests.get(url, timeout=10).text
         soup = BeautifulSoup(html, 'html.parser')
         return hashlib.sha256(soup.get_text().encode()).hexdigest()
-    except Exception as e:
+    except Exception:
         return None
 
-def check_all_urls(context):
-    job = context.job
-    chat_id = job.context
+async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
     urls = load_data()
     hashes = load_hashes()
     updated = False
+    bot = context.bot
+    chat_id = CHAT_ID
 
     for label, url in urls.items():
         new_hash = get_page_hash(url)
@@ -49,7 +59,11 @@ def check_all_urls(context):
             continue
 
         if hashes.get(label) != new_hash:
-            context.bot.send_message(chat_id, f"\ud83d\udd14 *{label}* has been updated!\n{url}", parse_mode="Markdown")
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🔔 *{label}* has been updated!\n{url}",
+                parse_mode="Markdown"
+            )
             hashes[label] = new_hash
             updated = True
 
@@ -57,20 +71,25 @@ def check_all_urls(context):
         save_hashes(hashes)
 
 # =============== TELEGRAM COMMANDS ===============
-def start(update, context):
-    update.message.reply_text("Welcome! Use /add [label] [url] to begin monitoring pages.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        await update.message.reply_text("Welcome! Use /add [label] [url] to begin monitoring pages.")
 
-def add(update, context):
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     args = context.args
-    if len(args) < 2:
-        return update.message.reply_text("Usage: /add [label] [url]")
+    if not args or len(args) < 2:
+        await update.message.reply_text("Usage: /add [label] [url]")
+        return
 
-    label = args[0]
-    url = args[1]
+    label, url = args[0], args[1]
     data = load_data()
 
     if label in data:
-        return update.message.reply_text(f"{label} already exists. Use /remove to delete first.")
+        await update.message.reply_text(f"{label} already exists. Use /remove to delete first.")
+        return
 
     data[label] = url
     save_data(data)
@@ -81,25 +100,35 @@ def add(update, context):
         hashes[label] = hash_val
         save_hashes(hashes)
 
-    update.message.reply_text(f"\u2705 Added: *{label}*\n{url}", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Added: *{label}*\n{url}", parse_mode="Markdown")
 
-def list_urls(update, context):
+async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     data = load_data()
     if not data:
-        return update.message.reply_text("No URLs are currently being monitored.")
-    msg = "\n".join([f"*{label}*: {url}" for label, url in data.items()])
-    update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text("No URLs are currently being monitored.")
+        return
 
-def remove(update, context):
+    msg = "\n".join([f"*{label}*: {url}" for label, url in data.items()])
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     args = context.args
     if not args:
-        return update.message.reply_text("Usage: /remove [label]")
+        await update.message.reply_text("Usage: /remove [label]")
+        return
 
     label = args[0]
     data = load_data()
 
     if label not in data:
-        return update.message.reply_text(f"No such label: {label}")
+        await update.message.reply_text(f"No such label: {label}")
+        return
 
     del data[label]
     save_data(data)
@@ -109,25 +138,28 @@ def remove(update, context):
         del hashes[label]
         save_hashes(hashes)
 
-    update.message.reply_text(f"\u274c Removed {label}.")
+    await update.message.reply_text(f"❌ Removed {label}.")
 
-def unknown(update, context):
-    update.message.reply_text("Command not recognized. Use /add, /remove, or /list.")
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        await update.message.reply_text("Command not recognized. Use /add, /remove, or /list.")
 
-# =============== MAIN LOOP ===============
+# =============== MAIN APP ===============
 def main():
-    updater = Updater(TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("add", add))
-    dp.add_handler(CommandHandler("list", list_urls))
-    dp.add_handler(CommandHandler("remove", remove))
-    dp.add_handler(MessageHandler(Filters.command, unknown))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("list", list_urls))
+    app.add_handler(CommandHandler("remove", remove))
+    app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    updater.job_queue.run_repeating(check_all_urls, interval=900, first=10, context=CHAT_ID)
-    updater.start_polling()
-    updater.idle()
+    # ✅ Run job queue task ONLY if job queue exists
+    if app.job_queue:
+        app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
+
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
+
