@@ -72,6 +72,9 @@ def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
             print("❌ GH_PAT or GITHUB_REPOSITORY not set")
             return
 
+        print(f"🔍 Repo: {repo}")
+        print(f"🔐 Token starts with: {token[:6]}...")
+
         subprocess.run([
             "git", "remote", "set-url", "origin",
             f"https://x-access-token:{token}@github.com/{repo}.git"
@@ -79,11 +82,14 @@ def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
 
         subprocess.run(["git", "add", DATA_FILE, HASH_FILE], check=True)
         subprocess.run(["git", "commit", "-m", message], check=False)
-        subprocess.run(["git", "push"], check=True)
 
-        print("✅ Committed & pushed with GH_PAT successfully.")
+        result = subprocess.run(["git", "push"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"❌ Push failed:\n{result.stderr}")
+        else:
+            print("✅ Pushed to GitHub successfully.")
     except Exception as e:
-        print(f"❌ Commit failed: {e}")
+        print(f"❌ Commit/Push failed: {e}")
 
 # =============== MONITORING LOGIC ===============
 def get_page_hash(url):
@@ -207,4 +213,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
