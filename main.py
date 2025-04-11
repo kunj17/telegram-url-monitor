@@ -31,7 +31,14 @@ HASH_FILE = 'url_hashes.json'
 
 # =============== STORAGE HELPERS ===============
 def load_data():
-    return json.load(open(DATA_FILE)) if os.path.exists(DATA_FILE) else {}
+    if not os.path.exists(DATA_FILE):
+        return {}
+    try:
+        with open(DATA_FILE) as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"⚠️ Warning: {DATA_FILE} was invalid. Reinitializing.")
+        return {}
 
 def save_data(data):
     with open(DATA_FILE, 'w') as f:
@@ -39,7 +46,14 @@ def save_data(data):
     commit_and_push_changes("✅ Updated URL data")
 
 def load_hashes():
-    return json.load(open(HASH_FILE)) if os.path.exists(HASH_FILE) else {}
+    if not os.path.exists(HASH_FILE):
+        return {}
+    try:
+        with open(HASH_FILE) as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"⚠️ Warning: {HASH_FILE} was invalid. Reinitializing.")
+        return {}
 
 def save_hashes(hashes):
     with open(HASH_FILE, 'w') as f:
@@ -193,3 +207,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
