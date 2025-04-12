@@ -2,7 +2,7 @@ name: Telegram URL Monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # Every 15 mins
+    - cron: "*/1440 * * * *"  # Every 15 mins
   workflow_dispatch:
 
 concurrency:
