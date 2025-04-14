@@ -13,6 +13,7 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
@@ -94,10 +95,16 @@ def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
 # =============== MONITORING LOGIC ===============
 def get_page_hash(url):
     try:
-        html = requests.get(url, timeout=10).text
-        soup = BeautifulSoup(html, 'html.parser')
-        return hashlib.sha256(soup.get_text().encode()).hexdigest()
-    except Exception:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(url, timeout=15000)
+            page.wait_for_timeout(3000)
+            content = page.content()
+            browser.close()
+            return hashlib.sha256(content.encode()).hexdigest()
+    except Exception as e:
+        print(f"⚠️ Error loading page {url}: {e}")
         return None
 
 async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
