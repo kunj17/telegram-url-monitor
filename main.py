@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import hashlib
@@ -183,6 +184,7 @@ async def list_urls(update: Update, context):
 # === MAIN ===
 if __name__ == '__main__':
     import asyncio
+    import nest_asyncio
     from telegram.ext import CommandHandler, MessageHandler, filters
 
     async def run_async_bot():
@@ -205,4 +207,14 @@ if __name__ == '__main__':
 
         await app.run_polling()
 
-    asyncio.run(run_async_bot())
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run_async_bot())
+    except RuntimeError as e:
+        if "already running" in str(e):
+            print("⚠️ Existing loop detected — patching with nest_asyncio...")
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(run_async_bot())
+        else:
+            raise
