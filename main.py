@@ -116,7 +116,8 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         old_hash = hashes.get(label)
-        print(f"🔍 Checking {label}:\n  OLD: {old_hash}\n  NEW: {new_hash}")
+        match_status = "✅ MATCH" if old_hash == new_hash else "❌ DIFFERENT"
+        print(f"🔍 [{label}]\n  OLD: {old_hash}\n  NEW: {new_hash}\n  STATUS: {match_status}")
 
         if old_hash != new_hash:
             await bot.send_message(
