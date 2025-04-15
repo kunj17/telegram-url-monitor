@@ -2,42 +2,43 @@ name: Telegram URL Monitor
 
 on:
   schedule:
-    - cron: "*/1440 * * * *"  # Every 24 hours
-  workflow_dispatch:
+    - cron: "0 2 * * *"  # 🕑 Once daily at 2:00 AM UTC (cleaner than */1440)
+  workflow_dispatch:       # 🔘 Manual trigger from GitHub UI
 
 concurrency:
   group: telegram-url-monitor
-  cancel-in-progress: true
+  cancel-in-progress: true  # 🚦 Prevent duplicate runs
 
 jobs:
   run-bot:
-    runs-on: ubuntu-22.04  # ✅ Use stable version Playwright supports
+    runs-on: ubuntu-22.04  # ✅ Recommended for Playwright stability
 
     steps:
     - name: ✅ Checkout repository
       uses: actions/checkout@v3
       with:
-        token: ${{ secrets.GH_PAT }}  # Required for push access
+        token: ${{ secrets.GH_PAT }}  # Required for pushing commits
 
-    - name: 🐍 Set up Python
+    - name: 🐍 Set up Python 3.10
       uses: actions/setup-python@v4
       with:
         python-version: "3.10"
 
-    - name: 📦 Install dependencies
+    - name: 📦 Install Python dependencies
       run: |
+        pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: 🎭 Install Playwright Browsers
+    - name: 🎭 Install Playwright and browser dependencies
       run: |
         python -m playwright install --with-deps
 
-    - name: ⚙️ Configure Git
+    - name: ⚙️ Configure Git identity
       run: |
         git config --global user.name "bot-runner"
         git config --global user.email "bot@auto.commit"
 
-    - name: 🚀 Run the bot
+    - name: 🚀 Run Telegram Monitor Bot
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
