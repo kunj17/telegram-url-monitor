@@ -1,184 +1,190 @@
 import os
-import asyncio
 import json
-import difflib
 import hashlib
+import difflib
 import asyncio
+import nest_asyncio
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+)
 from playwright.async_api import async_playwright
 
+# === CONFIGURATION ===
 load_dotenv()
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "unknown")
 DATA_FILE = "urls.json"
 HASH_FILE = "url_hashes.json"
-CONTENT_FILE = "latest_snapshots.json"
-GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
+DIFF_DIR = "diffs"
 
-# === FILE IO ===
-def load_json(path):
-    return json.load(open(path)) if os.path.exists(path) else {}
+os.makedirs(DIFF_DIR, exist_ok=True)
 
-def save_json(path, data):
-    with open(path, "w") as f:
+# === STORAGE ===
+def load_json(file):
+    if not os.path.exists(file):
+        return {}
+    try:
+        with open(file, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return {}
+
+def save_json(file, data):
+    with open(file, 'w') as f:
         json.dump(data, f, indent=2)
 
-# === SCRAPER ===
-async def get_page_text(url):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto(url, timeout=15000)
-        await page.wait_for_timeout(5000)
-        content = await page.inner_text("body")
-        await browser.close()
-        return content
+# === FETCH PAGE CONTENT ===
+async def fetch_page_content(url):
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(url, timeout=20000)
+            await page.wait_for_timeout(5000)
+            content = await page.content()
+            await browser.close()
+            return content.strip()
+    except Exception as e:
+        print(f"❌ Error fetching {url}: {e}")
+        return None
 
+# === HASHING ===
 def compute_hash(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
-# === MONITOR ===
+# === DIFFERENCE DETECTION ===
+def save_diff(label, old_text, new_text):
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    diff_path = os.path.join(DIFF_DIR, f"{label}_{timestamp}.diff")
+    with open(diff_path, 'w') as f:
+        diff = difflib.unified_diff(
+            old_text.splitlines(),
+            new_text.splitlines(),
+            fromfile='old',
+            tofile='new',
+            lineterm=''
+        )
+        f.write('\n'.join(diff))
+    return diff_path
+
+# === CHECK ALL URLS ===
 async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
+    print("\n🔍 Starting scheduled check...")
     urls = load_json(DATA_FILE)
     hashes = load_json(HASH_FILE)
-    contents = load_json(CONTENT_FILE)
-    bot = context.bot
 
     for label, url in urls.items():
-        try:
-            print(f"\n🔍 Checking {label} => {url}")
-            text = await get_page_text(url)
-            new_hash = compute_hash(text)
-            old_hash = hashes.get(label)
+        print(f"\n🌐 Checking: {label} -> {url}")
+        content = await fetch_page_content(url)
+        if content is None:
+            continue
 
-            if new_hash != old_hash:
-                print(f"  ⚠️ Change detected for {label}")
-                diff_html = difflib.HtmlDiff().make_file(
-                    contents.get(label, "").splitlines(),
-                    text.splitlines(),
-                    fromdesc="Before", todesc="After"
-                )
-                os.makedirs("diffs", exist_ok=True)
-                diff_path = f"diffs/{label}.html"
-                with open(diff_path, "w") as f:
-                    f.write(diff_html)
+        new_hash = compute_hash(content)
+        old_hash = hashes.get(label)
 
-                await bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=f"🔔 *{label}* has changed!\n{url}\nCheck details in GitHub repo's `diffs/{label}.html`",
-                    parse_mode="Markdown"
-                )
+        if old_hash != new_hash:
+            print(f"🔔 Change detected in: {label}")
+            old_content_path = os.path.join(DIFF_DIR, f"{label}_previous.html")
+            with open(old_content_path, 'w') as f:
+                f.write(content)
 
-                hashes[label] = new_hash
-                contents[label] = text
+            previous_text = ""
+            if old_hash and os.path.exists(old_content_path):
+                with open(old_content_path, 'r') as f:
+                    previous_text = f.read()
 
-            else:
-                print(f"  ✅ No change")
-        except Exception as e:
-            print(f"  ❌ Error checking {label}: {e}")
+            diff_file = save_diff(label, previous_text, content)
 
-    save_json(HASH_FILE, hashes)
-    save_json(CONTENT_FILE, contents)
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🔄 *{label}* has changed!\nURL: {url}\nDiff saved to: `{diff_file}`",
+                parse_mode="Markdown"
+            )
+            hashes[label] = new_hash
+            save_json(HASH_FILE, hashes)
+        else:
+            print(f"✅ No change in: {label}")
 
-# === COMMANDS ===
+# === TELEGRAM HANDLERS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to the Website Monitor Bot!\n\n" +
-        "Use /add [label] [url] to track a page.\n" +
-        "Use /list to view tracked URLs.\n" +
-        "Use /remove [label] to stop tracking."
+        "👋 Welcome to URL Monitor Bot!\n"
+        "Commands:\n"
+        "/add [label] [url] - Monitor a new page\n"
+        "/remove [label] - Stop monitoring\n"
+        "/list - List all monitored pages"
     )
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    if len(args) < 2:
+    if len(args) != 2:
         await update.message.reply_text("Usage: /add [label] [url]")
         return
-    label, url = args[0], args[1]
-    data = load_json(DATA_FILE)
-    if label in data:
-        await update.message.reply_text("Label already exists. Use /remove first.")
+    label, url = args
+    urls = load_json(DATA_FILE)
+    if label in urls:
+        await update.message.reply_text("That label already exists.")
         return
-    data[label] = url
-    save_json(DATA_FILE, data)
-    text = await get_page_text(url)
-    hashes = load_json(HASH_FILE)
-    hashes[label] = compute_hash(text)
-    save_json(HASH_FILE, hashes)
-    contents = load_json(CONTENT_FILE)
-    contents[label] = text
-    save_json(CONTENT_FILE, contents)
-    await update.message.reply_text(f"✅ Now tracking {label}")
-
-async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = load_json(DATA_FILE)
-    if not data:
-        await update.message.reply_text("No URLs are being tracked.")
-    else:
-        msg = "\n".join([f"*{k}*: {v}" for k, v in data.items()])
-        await update.message.reply_text(msg, parse_mode="Markdown")
+    urls[label] = url
+    save_json(DATA_FILE, urls)
+    content = await fetch_page_content(url)
+    if content:
+        hashes = load_json(HASH_FILE)
+        hashes[label] = compute_hash(content)
+        save_json(HASH_FILE, hashes)
+    await update.message.reply_text(f"✅ Monitoring started for *{label}*", parse_mode="Markdown")
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    if not args:
+    if len(args) != 1:
         await update.message.reply_text("Usage: /remove [label]")
         return
     label = args[0]
-    data = load_json(DATA_FILE)
-    if label in data:
-        del data[label]
-        save_json(DATA_FILE, data)
+    urls = load_json(DATA_FILE)
+    if label in urls:
+        del urls[label]
+        save_json(DATA_FILE, urls)
         hashes = load_json(HASH_FILE)
         hashes.pop(label, None)
         save_json(HASH_FILE, hashes)
-        contents = load_json(CONTENT_FILE)
-        contents.pop(label, None)
-        save_json(CONTENT_FILE, contents)
-        await update.message.reply_text(f"❌ Stopped tracking {label}")
+        await update.message.reply_text(f"🗑️ Removed monitoring for {label}.")
     else:
         await update.message.reply_text("Label not found.")
 
+async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    urls = load_json(DATA_FILE)
+    if not urls:
+        await update.message.reply_text("No URLs currently being monitored.")
+        return
+    message = "\n".join([f"*{k}*: {v}" for k, v in urls.items()])
+    await update.message.reply_text(message, parse_mode="Markdown")
+
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Unknown command. Use /start for help.")
+    await update.message.reply_text("❓ Unknown command. Use /start to see options.")
 
 # === MAIN ===
+async def run_async_bot():
+    print("🚀 Bot starting up...")
+    print(f"Monitoring URLs defined in: {DATA_FILE}")
+    print(f"Environment: {GITHUB_REPOSITORY}")
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("remove", remove))
+    app.add_handler(CommandHandler("list", list_urls))
+    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+
+    app.job_queue.run_repeating(check_all_urls, interval=900, first=5)
+
+    await app.run_polling()
+
 if __name__ == '__main__':
-
-    async def run_async_bot():
-        print("🚀 Bot starting up...")
-        print(f"Monitoring URLs defined in: {DATA_FILE}")
-        print(f"Environment: {GITHUB_REPOSITORY}")
-
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("add", add))
-        app.add_handler(CommandHandler("remove", remove))
-        app.add_handler(CommandHandler("list", list_urls))
-        app.add_handler(MessageHandler(filters.COMMAND, unknown))
-
-        if not os.path.exists("diffs"):
-            os.mkdir("diffs")
-
-        print("🕒 JobQueue found, setting up repeating check...")
-        app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
-
-        await app.run_polling()
-
-    # === Event loop safe execution ===
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            print("⚠️ Event loop already running. Creating task instead.")
-            loop.create_task(run_async_bot())
-        else:
-            loop.run_until_complete(run_async_bot())
-    except RuntimeError:
-        # If there's no current event loop, create one
-        print("⚠️ No event loop, creating a new one.")
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        new_loop.run_until_complete(run_async_bot())
+    loop = asyncio.get_event_loop()
+    nest_asyncio.apply(loop)
+    loop.run_until_complete(run_async_bot())
