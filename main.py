@@ -73,9 +73,6 @@ def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
             print("❌ GH_PAT or GITHUB_REPOSITORY not set")
             return
 
-        print(f"🔍 Repo: {repo}")
-        print(f"🔐 Token starts with: {token[:6]}...")
-
         subprocess.run([
             "git", "remote", "set-url", "origin",
             f"https://x-access-token:{token}@github.com/{repo}.git"
@@ -99,12 +96,12 @@ def get_page_hash(url):
             browser = p.chromium.launch()
             page = browser.new_page()
             page.goto(url, timeout=15000)
-            page.wait_for_timeout(3000)
-            content = page.content()
+            page.wait_for_timeout(7000)  # wait for JS updates
+            content = page.inner_text("body")  # get all visible text
             browser.close()
             return hashlib.sha256(content.encode()).hexdigest()
     except Exception as e:
-        print(f"⚠️ Error loading page {url}: {e}")
+        print(f"⚠️ Error fetching {url}: {e}")
         return None
 
 async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
@@ -115,9 +112,13 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
     for label, url in urls.items():
         new_hash = get_page_hash(url)
         if new_hash is None:
+            print(f"❌ Failed to fetch {label} - {url}")
             continue
 
-        if hashes.get(label) != new_hash:
+        old_hash = hashes.get(label)
+        print(f"🔍 Checking {label}:\n  OLD: {old_hash}\n  NEW: {new_hash}")
+
+        if old_hash != new_hash:
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=f"🔔 *{label}* has been updated!\n{url}",
