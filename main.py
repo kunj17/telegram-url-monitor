@@ -127,6 +127,7 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
             )
             hashes[label] = new_hash
             save_hashes(hashes)
+    print("✅ check_all_urls executed", flush=True)
 
 # =============== TELEGRAM COMMANDS ===============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,6 +205,11 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # =============== MAIN ===============
 def main():
+    print("🚀 Bot starting up...")
+    print(f"Monitoring URLs defined in: {DATA_FILE}")
+    print(f"Environment: {os.getenv('GITHUB_REPOSITORY')}")
+    print("Polling started...\n", flush=True)
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -213,12 +219,15 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     if app.job_queue:
+        print("🕒 JobQueue found, setting up repeating check...")
         app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
 
     try:
         app.run_polling()
     finally:
+        print("📦 Finalizing... committing any unsaved state", flush=True)
         commit_and_push_changes("🤖 Final auto-persist on workflow shutdown")
+
 
 if __name__ == '__main__':
     main()
