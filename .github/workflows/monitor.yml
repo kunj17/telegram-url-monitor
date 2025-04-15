@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # ✅ Use stable version Playwright supports
 
     steps:
     - name: ✅ Checkout repository
@@ -28,7 +28,7 @@ jobs:
       run: |
         pip install -r requirements.txt
 
-    - name: 🎭 Install Playwright browsers
+    - name: 🎭 Install Playwright Browsers
       run: |
         python -m playwright install --with-deps
 
