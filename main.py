@@ -1,9 +1,7 @@
 import json
 import hashlib
 import os
-import requests
 import subprocess
-from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,20 +15,12 @@ from playwright.async_api import async_playwright
 
 load_dotenv()
 
-# === CONFIG ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if TELEGRAM_TOKEN is None:
-    raise EnvironmentError("TELEGRAM_TOKEN environment variable not set.")
-
-chat_id_str = os.getenv("CHAT_ID")
-if chat_id_str is None:
-    raise EnvironmentError("CHAT_ID environment variable not set.")
-CHAT_ID = int(chat_id_str)
-
+CHAT_ID = int(os.getenv("CHAT_ID"))
 DATA_FILE = 'urls.json'
 HASH_FILE = 'url_hashes.json'
 
-# =============== STORAGE HELPERS ===============
+# ========== Helpers for storage ==========
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -38,13 +28,12 @@ def load_data():
         with open(DATA_FILE) as f:
             return json.load(f)
     except json.JSONDecodeError:
-        print(f"⚠️ Warning: {DATA_FILE} was invalid. Reinitializing.")
         return {}
 
 def save_data(data):
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=2)
-    commit_and_push_changes("✅ Updated URL data")
+    commit_and_push("✅ Updated URL data")
 
 def load_hashes():
     if not os.path.exists(HASH_FILE):
@@ -53,164 +42,130 @@ def load_hashes():
         with open(HASH_FILE) as f:
             return json.load(f)
     except json.JSONDecodeError:
-        print(f"⚠️ Warning: {HASH_FILE} was invalid. Reinitializing.")
         return {}
 
 def save_hashes(hashes):
     with open(HASH_FILE, 'w') as f:
         json.dump(hashes, f, indent=2)
-    commit_and_push_changes("✅ Updated hash data")
+    commit_and_push("✅ Updated hash data")
 
-# =============== COMMIT CHANGES IMMEDIATELY ===============
-def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
+# ========== Git Autocommit ==========
+def commit_and_push(msg):
     try:
         subprocess.run(["git", "config", "--global", "user.name", "bot-runner"], check=True)
         subprocess.run(["git", "config", "--global", "user.email", "bot@auto.commit"], check=True)
-
         repo = os.getenv("GITHUB_REPOSITORY")
         token = os.getenv("GH_PAT")
-        if not token or not repo:
-            print("❌ GH_PAT or GITHUB_REPOSITORY not set")
-            return
-
         subprocess.run([
             "git", "remote", "set-url", "origin",
             f"https://x-access-token:{token}@github.com/{repo}.git"
         ], check=True)
-
         subprocess.run(["git", "add", DATA_FILE, HASH_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", message], check=False)
-
-        result = subprocess.run(["git", "push"], capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"❌ Push failed:\n{result.stderr}")
-        else:
-            print("✅ Pushed to GitHub successfully.")
+        subprocess.run(["git", "commit", "-m", msg], check=False)
+        subprocess.run(["git", "push"], check=True)
     except Exception as e:
-        print(f"❌ Commit/Push failed: {e}")
+        print(f"❌ Git push failed: {e}")
 
-# =============== MONITORING LOGIC ===============
-async def get_page_hash_async(url):
+# ========== Fetch Full Rendered HTML ==========
+async def get_full_html(url):
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            await page.goto(url, timeout=15000)
-            await page.wait_for_timeout(7000)  # wait for JS to finish
-            content = await page.inner_text("body")
+            await page.goto(url, timeout=30000)
+            await page.wait_for_timeout(8000)
+            html = await page.content()
             await browser.close()
-            return hashlib.sha256(content.encode()).hexdigest()
+            return html
     except Exception as e:
         print(f"⚠️ Error fetching {url}: {e}")
         return None
 
+async def get_page_hash(url):
+    html = await get_full_html(url)
+    if html:
+        return hashlib.sha256(html.encode()).hexdigest(), html
+    return None, None
+
+# ========== Monitor URLs ==========
 async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
     urls = load_data()
     hashes = load_hashes()
     bot = context.bot
 
     for label, url in urls.items():
-        new_hash = await get_page_hash_async(url)
+        new_hash, html = await get_page_hash(url)
         if new_hash is None:
-            print(f"❌ Failed to fetch {label} - {url}")
             continue
 
         old_hash = hashes.get(label)
-        match_status = "✅ MATCH" if old_hash == new_hash else "❌ DIFFERENT"
-        print(f"🔍 [{label}]\n  OLD: {old_hash}\n  NEW: {new_hash}\n  STATUS: {match_status}")
-
         if old_hash != new_hash:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"🔔 *{label}* has been updated!\n{url}",
-                parse_mode="Markdown"
-            )
+            print(f"🔍 Change Detected in {label}")
+            print(f"OLD: {old_hash}\nNEW: {new_hash}")
+            await bot.send_message(chat_id=CHAT_ID, text=f"🔔 *{label}* changed!\n{url}", parse_mode="Markdown")
             hashes[label] = new_hash
             save_hashes(hashes)
 
-    print("✅ check_all_urls executed", flush=True)
+    print("✅ check_all_urls complete")
 
-# =============== TELEGRAM COMMANDS ===============
+# ========== Telegram Bot Commands ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
-        await update.message.reply_text("Welcome! Use /add [label] [url] to begin monitoring pages.")
+        await update.message.reply_text("Welcome! Use /add [label] [url] to monitor pages.")
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_text("Usage: /add [label] [url]")
         return
-
     label, url = args[0], args[1]
     data = load_data()
-
     if label in data:
         await update.message.reply_text(f"{label} already exists. Use /remove to delete first.")
         return
-
     data[label] = url
     save_data(data)
-
-    hash_val = await get_page_hash_async(url)
+    hash_val, _ = await get_page_hash(url)
     if hash_val:
         hashes = load_hashes()
         hashes[label] = hash_val
         save_hashes(hashes)
-
     await update.message.reply_text(f"✅ Added: *{label}*\n{url}", parse_mode="Markdown")
 
 async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
     data = load_data()
     if not data:
-        await update.message.reply_text("No URLs are currently being monitored.")
+        await update.message.reply_text("No URLs being monitored.")
         return
-
     msg = "\n".join([f"*{label}*: {url}" for label, url in data.items()])
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
     args = context.args or []
     if not args:
         await update.message.reply_text("Usage: /remove [label]")
         return
-
     label = args[0]
     data = load_data()
-
     if label not in data:
         await update.message.reply_text(f"No such label: {label}")
         return
-
     del data[label]
     save_data(data)
-
     hashes = load_hashes()
     if label in hashes:
         del hashes[label]
         save_hashes(hashes)
-
     await update.message.reply_text(f"❌ Removed {label}.")
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
-        await update.message.reply_text("Command not recognized. Use /add, /remove, or /list.")
+        await update.message.reply_text("Unknown command. Use /add, /list, /remove")
 
-# =============== MAIN ===============
+# ========== Main ==========
 def main():
-    print("🚀 Bot starting up...")
-    print(f"Monitoring URLs defined in: {DATA_FILE}")
-    print(f"Environment: {os.getenv('GITHUB_REPOSITORY')}")
-    print("Polling started...\n", flush=True)
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -219,15 +174,12 @@ def main():
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    if app.job_queue:
-        print("🕒 JobQueue found, setting up repeating check...")
-        app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
+    app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
 
     try:
         app.run_polling()
     finally:
-        print("📦 Finalizing... committing any unsaved state", flush=True)
-        commit_and_push_changes("🤖 Final auto-persist on workflow shutdown")
+        commit_and_push("🛑 Final update before shutdown")
 
 if __name__ == '__main__':
     main()
