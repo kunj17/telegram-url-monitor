@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -90,15 +90,15 @@ def commit_and_push_changes(message="🤖 Auto-update URL tracking state"):
         print(f"❌ Commit/Push failed: {e}")
 
 # =============== MONITORING LOGIC ===============
-def get_page_hash(url):
+async def get_page_hash_async(url):
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            page.goto(url, timeout=15000)
-            page.wait_for_timeout(7000)  # wait for JS updates
-            content = page.inner_text("body")  # get all visible text
-            browser.close()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.goto(url, timeout=15000)
+            await page.wait_for_timeout(7000)  # wait for JS to finish
+            content = await page.inner_text("body")
+            await browser.close()
             return hashlib.sha256(content.encode()).hexdigest()
     except Exception as e:
         print(f"⚠️ Error fetching {url}: {e}")
@@ -110,7 +110,7 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
 
     for label, url in urls.items():
-        new_hash = get_page_hash(url)
+        new_hash = await get_page_hash_async(url)
         if new_hash is None:
             print(f"❌ Failed to fetch {label} - {url}")
             continue
@@ -127,6 +127,7 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
             )
             hashes[label] = new_hash
             save_hashes(hashes)
+
     print("✅ check_all_urls executed", flush=True)
 
 # =============== TELEGRAM COMMANDS ===============
@@ -153,7 +154,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data[label] = url
     save_data(data)
 
-    hash_val = get_page_hash(url)
+    hash_val = await get_page_hash_async(url)
     if hash_val:
         hashes = load_hashes()
         hashes[label] = hash_val
@@ -227,7 +228,6 @@ def main():
     finally:
         print("📦 Finalizing... committing any unsaved state", flush=True)
         commit_and_push_changes("🤖 Final auto-persist on workflow shutdown")
-
 
 if __name__ == '__main__':
     main()
