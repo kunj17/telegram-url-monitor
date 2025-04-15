@@ -3,6 +3,7 @@ import os
 import json
 import hashlib
 import subprocess
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
