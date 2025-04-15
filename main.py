@@ -1,163 +1,208 @@
-# main.py
 import os
 import json
 import hashlib
+import difflib
 import subprocess
-import asyncio
-from dotenv import load_dotenv
+from datetime import datetime
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from playwright.async_api import async_playwright
+from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
+CHAT_ID = os.getenv("CHAT_ID")
 GH_PAT = os.getenv("GH_PAT")
-REPO = os.getenv("GITHUB_REPOSITORY")
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
 DATA_FILE = "urls.json"
 HASH_FILE = "url_hashes.json"
+HTML_FILE = "url_html_snapshots.json"
 
-# ---------- Utils ----------
-def load_json(file):
-    return json.load(open(file)) if os.path.exists(file) else {}
+# === UTILS ===
+def load_json(filename):
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            try:
+                return json.load(f)
+            except:
+                return {}
+    return {}
 
-def save_json(file, data):
-    with open(file, "w") as f:
+def save_json(filename, data):
+    with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
 
-def commit_and_push(msg):
+def commit_and_push_changes(message="🔁 Updated hash"):
     try:
-        subprocess.run(["git", "config", "--global", "user.name", "bot"], check=True)
-        subprocess.run(["git", "config", "--global", "user.email", "bot@ci"], check=True)
-        subprocess.run([
-            "git", "remote", "set-url", "origin",
-            f"https://x-access-token:{GH_PAT}@github.com/{REPO}.git"
-        ], check=True)
-        subprocess.run(["git", "add", DATA_FILE, HASH_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", msg], check=False)
-        subprocess.run(["git", "push"], check=False)
-        print("✅ Pushed to GitHub")
+        subprocess.run(["git", "config", "--global", "user.name", "bot-runner"])
+        subprocess.run(["git", "config", "--global", "user.email", "bot@auto.commit"])
+        subprocess.run(["git", "add", HASH_FILE, HTML_FILE], check=True)
+        subprocess.run(["git", "commit", "-m", message], check=False)
+        subprocess.run(["git", "push"], check=True)
+        print("✅ Pushed to GitHub successfully.")
     except Exception as e:
-        print(f"❌ Git error: {e}")
+        print(f"❌ Git push failed: {e}")
 
-# ---------- Core Monitoring ----------
-async def get_hash(url):
+# === SCRAPER ===
+async def fetch_page_data(url):
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch()
+            browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
-            await page.goto(url, timeout=20000)
+            await page.goto(url, timeout=30000)
             await page.wait_for_timeout(5000)
-            html = await page.content()
+            body_text = await page.inner_text("body")
+            full_html = await page.content()
             await browser.close()
-            return hashlib.sha256(html.encode()).hexdigest()
+            return body_text, full_html
     except Exception as e:
         print(f"⚠️ Error fetching {url}: {e}")
-        return None
+        return None, None
 
-async def check_all(context: ContextTypes.DEFAULT_TYPE):
+# === MONITOR ===
+async def check_all_urls(context):
     urls = load_json(DATA_FILE)
     hashes = load_json(HASH_FILE)
-    bot = context.bot
+    htmls = load_json(HTML_FILE)
 
     for label, url in urls.items():
-        new_hash = await get_hash(url)
-        if not new_hash:
+        print(f"\n🔍 Checking: {label} | {url}")
+        text, html = await fetch_page_data(url)
+        if not text or not html:
+            print(f"❌ Failed to fetch: {label}")
             continue
 
+        new_hash = hashlib.sha256(text.encode()).hexdigest()
         old_hash = hashes.get(label)
-        changed = old_hash != new_hash
+        hashes[label] = new_hash
 
-        print(f"🔍 {label} — Match: {not changed}")
-        if changed:
-            await bot.send_message(chat_id=CHAT_ID, text=f"🔔 {label} changed!\n{url}")
-            hashes[label] = new_hash
-            save_json(HASH_FILE, hashes)
-            commit_and_push("🔁 Updated hash")
+        if new_hash != old_hash:
+            print(f"🔔 CHANGE DETECTED in {label}!")
 
-# ---------- Bot Commands ----------
+            # Save diff
+            old_html = htmls.get(label, "")
+            diff = difflib.unified_diff(
+                old_html.splitlines(), html.splitlines(), lineterm=""
+            )
+            diff_text = "\n".join(diff)
+
+            # Save HTML snapshot and notify
+            htmls[label] = html
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"🔔 *{label}* changed!\n{url}\n\n📄 _Logged diff and snapshot._",
+                parse_mode="Markdown"
+            )
+
+            now = datetime.now().strftime("%Y%m%d-%H%M%S")
+            with open(f"diffs/{label}-{now}.diff", "w") as f:
+                f.write(diff_text)
+
+        else:
+            print("✅ No changes")
+
+    save_json(HASH_FILE, hashes)
+    save_json(HTML_FILE, htmls)
+    commit_and_push_changes()
+    print("✅ check_all_urls executed")
+
+# === COMMANDS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Ready! Use /add [label] [url]")
+    welcome_msg = (
+        "👋 Welcome to the *Website Monitor Bot*!\n\n"
+        "Use the following commands:\n"
+        "/add [label] [url] – Start monitoring a new page\n"
+        "/remove [label] – Stop monitoring a page\n"
+        "/list – Show all monitored URLs"
+    )
+    await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add(update: Update, context):
     args = context.args
     if len(args) < 2:
-        return await update.message.reply_text("Usage: /add [label] [url]")
+        await update.message.reply_text("Usage: /add [label] [url]")
+        return
 
     label, url = args[0], args[1]
-    data = load_json(DATA_FILE)
-    if label in data:
-        return await update.message.reply_text("Label already exists!")
+    urls = load_json(DATA_FILE)
+    if label in urls:
+        await update.message.reply_text("Label already exists.")
+        return
 
-    data[label] = url
-    save_json(DATA_FILE, data)
+    text, html = await fetch_page_data(url)
+    if not html:
+        await update.message.reply_text("Couldn't fetch page.")
+        return
 
-    new_hash = await get_hash(url)
-    if new_hash:
-        hashes = load_json(HASH_FILE)
-        hashes[label] = new_hash
-        save_json(HASH_FILE, hashes)
-        commit_and_push("➕ New URL added")
-        await update.message.reply_text(f"✅ Monitoring {label}")
-
-async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    label = context.args[0] if context.args else None
-    data = load_json(DATA_FILE)
-
-    if label not in data:
-        return await update.message.reply_text("Label not found!")
-
-    del data[label]
-    save_json(DATA_FILE, data)
-
+    urls[label] = url
     hashes = load_json(HASH_FILE)
-    if label in hashes:
-        del hashes[label]
-        save_json(HASH_FILE, hashes)
+    htmls = load_json(HTML_FILE)
+    hashes[label] = hashlib.sha256(text.encode()).hexdigest()
+    htmls[label] = html
 
-    commit_and_push("❌ Removed URL")
-    await update.message.reply_text(f"❌ Removed {label}")
+    save_json(DATA_FILE, urls)
+    save_json(HASH_FILE, hashes)
+    save_json(HTML_FILE, htmls)
 
-async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = load_json(DATA_FILE)
-    if not data:
-        return await update.message.reply_text("No URLs are being tracked.")
-    await update.message.reply_text("\n".join(f"{k}: {v}" for k, v in data.items()))
+    await update.message.reply_text(f"✅ Now tracking: {label}")
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Unrecognized command. Try /add or /list.")
+async def remove(update: Update, context):
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /remove [label]")
+        return
 
-# ---------- App Setup ----------
-async def run_async_bot():
-    print("🚀 Bot starting up...")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    label = args[0]
+    urls = load_json(DATA_FILE)
+    if label not in urls:
+        await update.message.reply_text("Label not found.")
+        return
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("remove", remove))
-    app.add_handler(CommandHandler("list", list_urls))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+    del urls[label]
+    hashes = load_json(HASH_FILE)
+    htmls = load_json(HTML_FILE)
+    hashes.pop(label, None)
+    htmls.pop(label, None)
 
-    print("🕒 JobQueue found, setting up repeating check...")
-    app.job_queue.run_repeating(check_all, interval=900, first=5)
+    save_json(DATA_FILE, urls)
+    save_json(HASH_FILE, hashes)
+    save_json(HTML_FILE, htmls)
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await app.updater.idle()
-    await app.stop()
-    await app.shutdown()
+    await update.message.reply_text(f"❌ Stopped monitoring: {label}")
 
-# ---------- Entrypoint ----------
-if __name__ == "__main__":
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(run_async_bot())
-        loop.run_forever()
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user.")
+async def list_urls(update: Update, context):
+    urls = load_json(DATA_FILE)
+    if not urls:
+        await update.message.reply_text("No URLs are being monitored.")
+        return
+    msg = "\n".join([f"*{label}* → {url}" for label, url in urls.items()])
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# === MAIN ===
+if __name__ == '__main__':
+    import asyncio
+    from telegram.ext import CommandHandler, MessageHandler, filters
+
+    async def run_async_bot():
+        print("🚀 Bot starting up...")
+        print(f"Monitoring URLs defined in: {DATA_FILE}")
+        print(f"Environment: {GITHUB_REPOSITORY}")
+
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("add", add))
+        app.add_handler(CommandHandler("remove", remove))
+        app.add_handler(CommandHandler("list", list_urls))
+
+        if not os.path.exists("diffs"):
+            os.mkdir("diffs")
+
+        print("🕒 JobQueue found, setting up repeating check...")
+        app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
+
+        await app.run_polling()
+
+    asyncio.run(run_async_bot())
