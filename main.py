@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import difflib
 import hashlib
@@ -144,22 +145,40 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❓ Unknown command. Use /start for help.")
 
 # === MAIN ===
-async def run_async_bot():
-    print("🚀 Bot starting up...")
-    print(f"Monitoring URLs defined in: {DATA_FILE}")
-    print(f"Environment: {GITHUB_REPOSITORY}")
-
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("list", list_urls))
-    app.add_handler(CommandHandler("remove", remove))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
-
-    app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
-
-    await app.run_polling()
-
 if __name__ == '__main__':
-    asyncio.run(run_async_bot())
+
+    async def run_async_bot():
+        print("🚀 Bot starting up...")
+        print(f"Monitoring URLs defined in: {DATA_FILE}")
+        print(f"Environment: {GITHUB_REPOSITORY}")
+
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("add", add))
+        app.add_handler(CommandHandler("remove", remove))
+        app.add_handler(CommandHandler("list", list_urls))
+        app.add_handler(MessageHandler(filters.COMMAND, unknown))
+
+        if not os.path.exists("diffs"):
+            os.mkdir("diffs")
+
+        print("🕒 JobQueue found, setting up repeating check...")
+        app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
+
+        await app.run_polling()
+
+    # === Event loop safe execution ===
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            print("⚠️ Event loop already running. Creating task instead.")
+            loop.create_task(run_async_bot())
+        else:
+            loop.run_until_complete(run_async_bot())
+    except RuntimeError:
+        # If there's no current event loop, create one
+        print("⚠️ No event loop, creating a new one.")
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        new_loop.run_until_complete(run_async_bot())
