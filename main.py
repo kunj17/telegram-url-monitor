@@ -1,145 +1,115 @@
+# main.py
 import os
 import json
 import hashlib
-import asyncio
 import subprocess
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters
 )
 from playwright.async_api import async_playwright
 
-# =============== ENV SETUP ===============
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 GH_PAT = os.getenv("GH_PAT")
-GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
+REPO = os.getenv("GITHUB_REPOSITORY")
 
 DATA_FILE = "urls.json"
 HASH_FILE = "url_hashes.json"
 
-# =============== FILE HELPERS ===============
-def load_json(path):
-    if not os.path.exists(path): return {}
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        print(f"⚠️ Warning: {path} is corrupted.")
-        return {}
+# ---------- Utils ----------
+def load_json(file):
+    return json.load(open(file)) if os.path.exists(file) else {}
 
-def save_json(path, data):
-    with open(path, "w") as f:
+def save_json(file, data):
+    with open(file, "w") as f:
         json.dump(data, f, indent=2)
 
-# =============== GIT COMMIT ===============
-def commit_and_push(message):
+def commit_and_push(msg):
     try:
-        subprocess.run(["git", "config", "--global", "user.name", "bot-runner"], check=True)
-        subprocess.run(["git", "config", "--global", "user.email", "bot@auto.commit"], check=True)
-
-        if not GH_PAT or not GITHUB_REPOSITORY:
-            print("❌ GH_PAT or GITHUB_REPOSITORY missing.")
-            return
-
+        subprocess.run(["git", "config", "--global", "user.name", "bot"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "bot@ci"], check=True)
         subprocess.run([
             "git", "remote", "set-url", "origin",
-            f"https://x-access-token:{GH_PAT}@github.com/{GITHUB_REPOSITORY}.git"
+            f"https://x-access-token:{GH_PAT}@github.com/{REPO}.git"
         ], check=True)
-
         subprocess.run(["git", "add", DATA_FILE, HASH_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", message], check=False)
+        subprocess.run(["git", "commit", "-m", msg], check=False)
         subprocess.run(["git", "push"], check=False)
-        print("✅ Pushed to GitHub.")
+        print("✅ Pushed to GitHub")
     except Exception as e:
-        print(f"❌ Git push failed: {e}")
+        print(f"❌ Git error: {e}")
 
-# =============== PAGE MONITORING ===============
-async def get_rendered_hash(url):
+# ---------- Core Monitoring ----------
+async def get_hash(url):
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch()
             page = await browser.new_page()
             await page.goto(url, timeout=20000)
-            await page.wait_for_timeout(5000)  # Allow JS to run
-
-            content = await page.content()
-            print(f"\n🔍 Cleaned content preview:\n{content[:800]}...\n")
-
+            await page.wait_for_timeout(5000)
+            html = await page.content()
             await browser.close()
-            return hashlib.sha256(content.encode()).hexdigest()
+            return hashlib.sha256(html.encode()).hexdigest()
     except Exception as e:
-        print(f"⚠️ Error rendering {url}: {e}")
+        print(f"⚠️ Error fetching {url}: {e}")
         return None
 
-async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
+async def check_all(context: ContextTypes.DEFAULT_TYPE):
     urls = load_json(DATA_FILE)
     hashes = load_json(HASH_FILE)
     bot = context.bot
 
     for label, url in urls.items():
-        new_hash = await get_rendered_hash(url)
-        if new_hash is None:
+        new_hash = await get_hash(url)
+        if not new_hash:
             continue
 
         old_hash = hashes.get(label)
-        status = "✅ SAME" if old_hash == new_hash else "❌ CHANGED"
-        print(f"🔍 [{label}]\n  OLD: {old_hash}\n  NEW: {new_hash}\n  STATUS: {status}\n")
+        changed = old_hash != new_hash
 
-        if old_hash != new_hash:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"🔔 *{label}* changed!\n{url}",
-                parse_mode="Markdown"
-            )
+        print(f"🔍 {label} — Match: {not changed}")
+        if changed:
+            await bot.send_message(chat_id=CHAT_ID, text=f"🔔 {label} changed!\n{url}")
             hashes[label] = new_hash
             save_json(HASH_FILE, hashes)
-            commit_and_push("✅ Updated hash data")
+            commit_and_push("🔁 Updated hash")
 
-# =============== TELEGRAM COMMANDS ===============
+# ---------- Bot Commands ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Use /add [label] [url] to monitor a page.")
+    await update.message.reply_text("✅ Ready! Use /add [label] [url]")
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args or []
+    args = context.args
     if len(args) < 2:
-        await update.message.reply_text("Usage: /add [label] [url]")
-        return
+        return await update.message.reply_text("Usage: /add [label] [url]")
 
     label, url = args[0], args[1]
     data = load_json(DATA_FILE)
     if label in data:
-        await update.message.reply_text("Label already exists.")
-        return
+        return await update.message.reply_text("Label already exists!")
 
     data[label] = url
     save_json(DATA_FILE, data)
 
-    hash_val = await get_rendered_hash(url)
-    if hash_val:
+    new_hash = await get_hash(url)
+    if new_hash:
         hashes = load_json(HASH_FILE)
-        hashes[label] = hash_val
+        hashes[label] = new_hash
         save_json(HASH_FILE, hashes)
-        commit_and_push("✅ Updated URL data + hash")
-        await update.message.reply_text(f"✅ Added: *{label}*", parse_mode="Markdown")
+        commit_and_push("➕ New URL added")
+        await update.message.reply_text(f"✅ Monitoring {label}")
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args or []
-    label = args[0] if args else None
-    if not label:
-        await update.message.reply_text("Usage: /remove [label]")
-        return
-
+    label = context.args[0] if context.args else None
     data = load_json(DATA_FILE)
+
     if label not in data:
-        await update.message.reply_text("Label not found.")
-        return
+        return await update.message.reply_text("Label not found!")
 
     del data[label]
     save_json(DATA_FILE, data)
@@ -149,28 +119,23 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del hashes[label]
         save_json(HASH_FILE, hashes)
 
-    commit_and_push("🗑️ Removed monitored URL")
-    await update.message.reply_text(f"❌ Removed {label}.")
+    commit_and_push("❌ Removed URL")
+    await update.message.reply_text(f"❌ Removed {label}")
 
 async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_json(DATA_FILE)
     if not data:
-        await update.message.reply_text("No monitored URLs.")
-        return
-
-    msg = "\n".join([f"*{k}*: {v}" for k, v in data.items()])
-    await update.message.reply_text(msg, parse_mode="Markdown")
+        return await update.message.reply_text("No URLs are being tracked.")
+    await update.message.reply_text("\n".join(f"{k}: {v}" for k, v in data.items()))
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Unknown command. Try /add, /list or /remove.")
+    await update.message.reply_text("Unrecognized command. Try /add or /list.")
 
-# =============== MAIN APP ===============
-async def run_bot():
+# ---------- App Setup ----------
+async def run_async_bot():
     print("🚀 Bot starting up...")
-    print(f"Monitoring URLs defined in: {DATA_FILE}")
-    print(f"Environment: {GITHUB_REPOSITORY}")
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("remove", remove))
@@ -178,19 +143,20 @@ async def run_bot():
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     print("🕒 JobQueue found, setting up repeating check...")
-    app.job_queue.run_repeating(check_all_urls, interval=900, first=10)
+    app.job_queue.run_repeating(check_all, interval=900, first=5)
 
-    await app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
+    await app.stop()
+    await app.shutdown()
 
-# =============== ENTRY POINT ===============
-if __name__ == '__main__':
+# ---------- Entrypoint ----------
+if __name__ == "__main__":
     try:
-        asyncio.run(run_bot())
-    except RuntimeError as e:
-        if "already running" in str(e):
-            print("⚠️ Already in an async loop, using existing loop.")
-            loop = asyncio.get_event_loop()
-            loop.create_task(run_bot())
-            loop.run_forever()
-        else:
-            raise
+        loop = asyncio.get_event_loop()
+        loop.create_task(run_async_bot())
+        loop.run_forever()
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user.")
