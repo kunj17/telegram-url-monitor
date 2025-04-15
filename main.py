@@ -198,6 +198,7 @@ if __name__ == '__main__':
         app.add_handler(CommandHandler("add", add))
         app.add_handler(CommandHandler("remove", remove))
         app.add_handler(CommandHandler("list", list_urls))
+        app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
         if not os.path.exists("diffs"):
             os.mkdir("diffs")
@@ -207,14 +208,15 @@ if __name__ == '__main__':
 
         await app.run_polling()
 
+    # ✅ Apply fix for "already running loop" error
     try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(run_async_bot())
+        asyncio.run(run_async_bot())
     except RuntimeError as e:
         if "already running" in str(e):
-            print("⚠️ Existing loop detected — patching with nest_asyncio...")
+            print("⚠️ Detected existing asyncio loop. Applying `nest_asyncio` patch...")
             nest_asyncio.apply()
             loop = asyncio.get_event_loop()
-            loop.run_until_complete(run_async_bot())
+            loop.create_task(run_async_bot())
+            loop.run_forever()
         else:
             raise
