@@ -6,7 +6,13 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 from playwright.async_api import async_playwright
 
 # === Load environment variables ===
@@ -70,13 +76,12 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
 
         if old_hash != new_hash:
             timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-            old_file = os.path.join(DIFF_DIR, f"{label}_old.html")
-            new_file = os.path.join(DIFF_DIR, f"{label}_new.html")
+            old_file = os.path.join(DIFF_DIR, f"{label}_old_{timestamp}.html")
+            new_file = os.path.join(DIFF_DIR, f"{label}_new_{timestamp}.html")
 
-            if old_hash:
-                with open(old_file, 'w') as f:
-                    f.write(hashes.get(f"{label}_content", ""))
-
+            old_content = hashes.get(f"{label}_content", "")
+            with open(old_file, 'w') as f:
+                f.write(old_content)
             with open(new_file, 'w') as f:
                 f.write(content)
 
@@ -86,13 +91,13 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
 
             # Create diff summary
             diff = difflib.unified_diff(
-                hashes.get(f"{label}_content", "").splitlines(),
+                old_content.splitlines(),
                 content.splitlines(),
-                fromfile='before',
-                tofile='after',
-                lineterm=''  # No trailing newlines
+                fromfile='old',
+                tofile='new',
+                lineterm=''
             )
-            diff_snippet = '\n'.join(list(diff)[:20]) or "(Large diff or dynamic content - see log.)"
+            diff_snippet = '\n'.join(list(diff)[:20]) or "(Large diff or dynamic content - see full files.)"
 
             message = (
                 f"\U0001F514 *{label}* has changed!\n"
@@ -176,9 +181,18 @@ async def run():
     app.add_handler(CommandHandler("list", list_urls))
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
-
     app.job_queue.run_repeating(check_all_urls, interval=900, first=5)
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            print("⚠️ Event loop already running. Creating a new one.")
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            new_loop.run_until_complete(run())
+        else:
+            loop.run_until_complete(run())
+    except RuntimeError:
+        asyncio.run(run())
