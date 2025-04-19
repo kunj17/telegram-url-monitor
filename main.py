@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
 )
 from playwright.async_api import async_playwright
+import nest_asyncio
 
 # === Load environment variables ===
 load_dotenv()
@@ -89,21 +90,8 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
             hashes[f"{label}_content"] = content
             save_json(hashes, HASH_FILE)
 
-            # Create diff summary
-            diff = difflib.unified_diff(
-                old_content.splitlines(),
-                content.splitlines(),
-                fromfile='old',
-                tofile='new',
-                lineterm=''
-            )
-            diff_snippet = '\n'.join(list(diff)[:20]) or "(Large diff or dynamic content - see full files.)"
-
-            message = (
-                f"\U0001F514 *{label}* has changed!\n"
-                f"{url}\n\n"
-                f"```diff\n{diff_snippet}\n```"
-            )
+            print("📤 Change detected. Saved diffs.")
+            message = f"\U0001F514 *{label}* updated. View: {url}"
             await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
         else:
             print("✅ No change detected.")
@@ -112,8 +100,8 @@ async def check_all_urls(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to the URL Monitor Bot!\n"
-        "Use /add <label> <url> to begin monitoring a site.\n"
-        "Use /list to see current URLs. /remove <label> to stop monitoring."
+        "Use /add <label> <url> to start monitoring.\n"
+        "Use /list to see URLs. /remove <label> to stop."
     )
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,12 +113,12 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     label, url = args[0], args[1]
     urls = load_json(DATA_FILE)
     if label in urls:
-        await update.message.reply_text(f"⚠️ {label} already exists. Remove first.")
+        await update.message.reply_text(f"⚠️ {label} already exists. Remove it first.")
         return
 
     content = await get_page_text(url)
     if content is None:
-        await update.message.reply_text("❌ Couldn't fetch URL.")
+        await update.message.reply_text("❌ Couldn't fetch the URL.")
         return
 
     urls[label] = url
@@ -141,12 +129,12 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hashes[f"{label}_content"] = content
     save_json(hashes, HASH_FILE)
 
-    await update.message.reply_text(f"✅ Now monitoring *{label}*\n{url}", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Monitoring *{label}*\n{url}", parse_mode="Markdown")
 
 async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = load_json(DATA_FILE)
     if not urls:
-        await update.message.reply_text("No URLs are being monitored.")
+        await update.message.reply_text("No URLs being monitored.")
         return
     text = '\n'.join([f"*{k}*: {v}" for k, v in urls.items()])
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -171,7 +159,7 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Label not found.")
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Unknown command. Use /add /list /remove.")
+    await update.message.reply_text("❓ Unknown command. Try /add, /list, or /remove.")
 
 # === Main Runner ===
 async def run():
@@ -185,21 +173,16 @@ async def run():
     await app.run_polling()
 
 if __name__ == "__main__":
-    import nest_asyncio
-    import asyncio
-
     print("🚀 Bot starting up...")
     print(f"Monitoring URLs defined in: {DATA_FILE}")
     print(f"Environment: {GITHUB_REPOSITORY}")
-
-    # Patch for environments with existing event loops (e.g., GitHub Actions, notebooks)
     nest_asyncio.apply()
 
     try:
         asyncio.run(run())
     except RuntimeError as e:
         if "already running" in str(e):
-            print("⚠️ Detected running event loop. Creating task inside existing loop.")
+            print("⚠️ Detected running event loop. Using loop.create_task().")
             loop = asyncio.get_event_loop()
             loop.create_task(run())
             loop.run_forever()
