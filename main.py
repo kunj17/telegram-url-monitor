@@ -185,14 +185,21 @@ async def run():
     await app.run_polling()
 
 if __name__ == "__main__":
+    print("🚀 Bot starting up...")
+    print(f"Monitoring URLs defined in: {DATA_FILE}")
+    print(f"Environment: {GITHUB_REPOSITORY}")
+
     try:
         loop = asyncio.get_event_loop()
-        if loop.is_running():
-            print("⚠️ Event loop already running. Creating a new one.")
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            new_loop.run_until_complete(run())
-        else:
-            loop.run_until_complete(run())
     except RuntimeError:
-        asyncio.run(run())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(run())
+    except RuntimeError as e:
+        if "This event loop is already running" in str(e):
+            print("⚠️ Event loop already running. Starting task directly.")
+            loop.create_task(run())
+        else:
+            raise
