@@ -185,21 +185,23 @@ async def run():
     await app.run_polling()
 
 if __name__ == "__main__":
+    import nest_asyncio
+    import asyncio
+
     print("🚀 Bot starting up...")
     print(f"Monitoring URLs defined in: {DATA_FILE}")
     print(f"Environment: {GITHUB_REPOSITORY}")
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    # Patch for environments with existing event loops (e.g., GitHub Actions, notebooks)
+    nest_asyncio.apply()
 
     try:
-        loop.run_until_complete(run())
+        asyncio.run(run())
     except RuntimeError as e:
-        if "This event loop is already running" in str(e):
-            print("⚠️ Event loop already running. Starting task directly.")
+        if "already running" in str(e):
+            print("⚠️ Detected running event loop. Creating task inside existing loop.")
+            loop = asyncio.get_event_loop()
             loop.create_task(run())
+            loop.run_forever()
         else:
             raise
